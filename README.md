@@ -51,6 +51,12 @@ For a standalone install, double-click **`build_exe.bat`** — it compiles a por
 2. Double-click **`build_apk.bat`** — it checks prerequisites, then builds `shepherd.apk`.
 3. Install the APK on the device; grant location permission for GPS node capture.
 
+> **Launcher icons:** the `android/app/src/main/res/mipmap-*/ic_launcher.png`
+> files are not stored in this repo (binary upload isn't supported here) —
+> copy them from your local project into the same paths before building,
+> or regenerate them with
+> [flutter_launcher_icons](https://pub.dev/packages/flutter_launcher_icons).
+
 > **Note:** `lib/services/wifi_aware.dart` / `MainActivity.kt` contain experimental Wi-Fi Aware discovery (hand-written, cooperative-only). If the APK build fails in `compileReleaseKotlin`, that file is the first suspect — deleting it and its channel block builds fine without the Aware panel.
 
 ## Screenshots
