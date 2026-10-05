@@ -1,0 +1,831 @@
+import 'dart:math' as math;
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+
+import '../models/tracking.dart';
+import '../services/tracker.dart';
+import '../state/app_state.dart';
+import '../theme.dart';
+
+/// Tracking tab in the RuView observatory style: dark field map with
+/// glowing nodes, fused track readout as technical rows, node heights.
+///
+/// Honest by construction: altitude shows "unknown" when nodes are
+/// coplanar, heading/speed appear only once the target moves between
+/// fixes, and the type guess is always labeled low-confidence.
+class TrackingScreen extends StatefulWidget {
+  const TrackingScreen({super.key, required this.state});
+
+  final AppState state;
+
+  @override
+  State<TrackingScreen> createState() => _TrackingScreenState();
+}
+
+class _TrackingScreenState extends State<TrackingScreen> {
+  /// nodeId being dragged, 'defended', or null.
+  String? _dragging;
+
+  /// Shadow (attenuation) heatmap overlay on the field map.
+  bool _showShadow = true;
+
+  /// Map zoom (wheel / buttons). Pinch is reserved for node dragging.
+  double _mapZoom = 1.0;
+
+  /// Fullscreen field map: the map fills the whole tab area.
+  bool _mapFullscreen = false;
+
+  void _bumpMapZoom(double f) => setState(() {
+        _mapZoom = (_mapZoom * f).clamp(0.5, 4.0);
+      });
+
+  AppState get state => widget.state;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: state,
+      builder: (context, _) {
+        final nodes = state.effectiveNodes.values.toList();
+        final live = !state.settings.simulatedMode;
+        if (_mapFullscreen) {
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: _mapVisualization(nodes, live, expand: true),
+                ),
+              ),
+              Positioned(
+                top: 12,
+                left: 12,
+                child: _fullscreenChip(),
+              ),
+            ],
+          );
+        }
+        return ListView(
+          padding: const EdgeInsets.all(12),
+          children: [
+            _mapCard(nodes, live),
+            const SizedBox(height: 12),
+            if (live) ...[
+              _gpsCard(nodes),
+              const SizedBox(height: 12),
+            ],
+            _readoutCard(),
+            const SizedBox(height: 12),
+            if (live) ...[
+              _nodeHeightsCard(nodes),
+              const SizedBox(height: 12),
+            ],
+            const _TrackScopeNote(),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _mapCard(List<NodePosition> nodes, bool live) {
+    return SentryPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('FIELD MAP', style: SentryType.section()),
+              const Spacer(),
+              IconButton(
+                tooltip: 'FULLSCREEN',
+                icon: const Icon(Icons.fullscreen,
+                    color: SentryColors.muted, size: 20),
+                onPressed: () =>
+                    setState(() => _mapFullscreen = true),
+              ),
+              TextButton(
+                onPressed: () =>
+                    setState(() => _showShadow = !_showShadow),
+                child: Text(
+                    _showShadow ? 'SHADOW ON' : 'SHADOW OFF'),
+              ),
+              Text(
+                live ? 'LIVE LAYOUT' : 'SIMULATED LAYOUT',
+                style: SentryType.section(10).copyWith(
+                  color: live ? SentryColors.green : SentryColors.orange,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'DRAG NODES TO THEIR REAL SPOTS. DRAG THE RED MARKER TO MOVE THE DEFENDED POINT. '
+            'THE SHADOW IS WHERE THE RF FIELD DIMS — WHAT THE WAVES ARE HITTING. '
+            'SCROLL OR USE +/− TO ZOOM. ONE MAP, EVERY RADIO: NODE COLORS MARK THE DRIVER.',
+            style: SentryType.section(10),
+          ),
+          const SizedBox(height: 8),
+          _driverLegend(nodes),
+          const SizedBox(height: 8),
+          _mapVisualization(nodes, live),
+          if (live) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: state.resetLayout,
+                child: const Text('RESET LAYOUT'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// The interactive field map visualization. With [expand], it fills
+  /// whatever space the parent gives it (fullscreen mode); otherwise
+  /// it renders at the standard card height.
+  Widget _mapVisualization(List<NodePosition> nodes, bool live,
+      {bool expand = false}) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final h = expand ? constraints.maxHeight : 320.0;
+        final size =
+            Size(constraints.maxWidth, h.isFinite ? h : 320.0);
+        return Stack(
+          children: [
+            Listener(
+              onPointerSignal: (signal) {
+                if (signal is PointerScrollEvent) {
+                  _bumpMapZoom(signal.scrollDelta.dy < 0
+                      ? 1.12
+                      : 1 / 1.12);
+                }
+              },
+              child: GestureDetector(
+                onPanStart: (d) =>
+                    _onPanStart(d.localPosition, size, nodes, live),
+                onPanUpdate: (d) =>
+                    _onPanUpdate(d.localPosition, size, live),
+                onPanEnd: (_) => setState(() => _dragging = null),
+                child: CustomPaint(
+                  size: size,
+                  painter: _TrackingMapPainter(
+                    transform: _buildTransform(size, nodes),
+                    nodes: nodes,
+                    disturbedPairs: state.disturbedPairs,
+                    defended: state.defended,
+                    track: state.track,
+                    shadow: state.shadow,
+                    showShadow: _showShadow,
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              right: 4,
+              top: 4,
+              child: SentryZoomControls(
+                onZoomIn: () => _bumpMapZoom(1.25),
+                onZoomOut: () => _bumpMapZoom(1 / 1.25),
+                onReset: () => setState(() => _mapZoom = 1.0),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  _MapTransform _buildTransform(Size size, List<NodePosition> nodes) {
+    final pts = <math.Point<double>>[];
+    for (final n in nodes) {
+      pts.add(math.Point(n.x, n.y));
+    }
+    pts.add(math.Point(state.defended.x, state.defended.y));
+    final t = state.track;
+    if (t != null) pts.add(math.Point(t.x, t.y));
+    return _MapTransform.fit(size, pts, zoom: _mapZoom);
+  }
+
+  void _onPanStart(
+      Offset p, Size size, List<NodePosition> nodes, bool live) {
+    final tr = _buildTransform(size, nodes);
+    // Defended point first (topmost).
+    final d = tr.toScreen(state.defended.x, state.defended.y);
+    if ((p - d).distance < 26) {
+      setState(() => _dragging = 'defended');
+      return;
+    }
+    if (!live) return; // sim layout is fixed
+    for (final n in nodes) {
+      final s = tr.toScreen(n.x, n.y);
+      if ((p - s).distance < 26) {
+        setState(() => _dragging = n.nodeId);
+        return;
+      }
+    }
+  }
+
+  void _onPanUpdate(Offset p, Size size, bool live) {
+    final drag = _dragging;
+    if (drag == null) return;
+    final tr = _buildTransform(size, state.effectiveNodes.values.toList());
+    final wx = tr.toWorldX(p.dx);
+    final wy = tr.toWorldY(p.dy);
+    if (drag == 'defended') {
+      state.moveDefended(wx, wy);
+    } else if (live) {
+      state.moveNode(drag, wx, wy);
+    }
+  }
+
+  /// Legend: which driver color marks which radio family on the map.
+  Widget _driverLegend(List<NodePosition> nodes) {
+    final drivers = <String>{};
+    for (final n in nodes) {
+      drivers.add(driverOf(n.nodeId));
+    }
+    if (drivers.length < 2) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 14,
+      runSpacing: 4,
+      children: [
+        for (final d in drivers)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 9,
+                height: 9,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: driverColor(d),
+                ),
+              ),
+              const SizedBox(width: 5),
+              Text(d.isEmpty ? 'UNKNOWN' : d.toUpperCase(),
+                  style: SentryType.section(10)),
+            ],
+          ),
+      ],
+    );
+  }
+
+  /// Floating exit-fullscreen chip shown over fullscreen views.
+  Widget _fullscreenChip() {
+    return Material(
+      color: SentryColors.surface2.withAlpha(220),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => setState(() => _mapFullscreen = false),
+        child: Padding(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.fullscreen_exit,
+                  color: SentryColors.onDark, size: 16),
+              const SizedBox(width: 6),
+              Text('EXIT FULLSCREEN',
+                  style: SentryType.section(10)
+                      .copyWith(color: SentryColors.onDark)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _readoutCard() {
+    final t = state.track;
+    return SentryPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('TRACK ESTIMATE', style: SentryType.section()),
+              const Spacer(),
+              if (t != null) _relationChip(t.relation),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (t == null)
+            Text(
+              'NO ACTIVE TARGET. DISTURB A LINK AND THE ESTIMATE APPEARS HERE.',
+              style: SentryType.rowLabel(),
+            )
+          else ...[
+            _row('POSITION', t.positionLabel, SentryColors.onDark),
+            _row('ALTITUDE', '', SentryColors.muted),
+            _altitudeBody(t),
+            _row(
+                'SPEED',
+                t.speedMps == null
+                    ? '—'
+                    : '${t.speedMps!.toStringAsFixed(1)} M/S EST',
+                SentryColors.blue),
+            _row(
+                'HEADING',
+                t.headingDeg == null
+                    ? '—  TARGET NOT MOVING YET'
+                    : '${t.headingCompass} ${t.headingDeg!.toStringAsFixed(0)}° EST',
+                SentryColors.blue),
+            _row('SIZE', '${t.sizeClass} EST', SentryColors.onDark),
+            _row('TYPE GUESS', '${t.typeGuess} — LOW CONFIDENCE',
+                SentryColors.muted),
+            _row('LINKS USED', '${t.linksUsed}', SentryColors.muted),
+            if (t.stitchLabel != null)
+              _row(
+                  'STITCH',
+                  '${t.stitchLabel} — AI ${(t.stitchConfidence! * 100).toStringAsFixed(0)}% SAME MOVER EST',
+                  SentryColors.purple),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _altitudeBody(TrackEstimate t) {
+    if (t.altitudeM == null) {
+      return Padding(
+        padding: const EdgeInsets.only(left: 116, bottom: 4),
+        child: Text(
+          'UNKNOWN — NODES ARE COPLANAR. PUT ONE RADIO ON A MAST, ROOF OR HILL TO UNLOCK ALTITUDE.',
+          style: SentryType.section(10).copyWith(height: 1.6),
+        ),
+      );
+    }
+    final conf = t.altitudeConfidence;
+    final qual = conf < 0.4 ? 'ROUGH' : conf < 0.7 ? 'MODERATE' : 'GOOD';
+    return Padding(
+      padding: const EdgeInsets.only(left: 116, bottom: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '≈ ${t.altitudeM!.toStringAsFixed(1)} M ABOVE GROUND — EST, $qual',
+            style: SentryType.readout(16, SentryColors.green),
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: 180,
+            child: LinearProgressIndicator(
+              value: conf,
+              color: SentryColors.green,
+              backgroundColor: SentryColors.surface2,
+              minHeight: 3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _relationChip(String relation) {
+    final color = switch (relation) {
+      'INBOUND' || 'OVERHEAD' => SentryColors.red,
+      'OUTBOUND' => SentryColors.green,
+      'TRANSITING' => SentryColors.amber,
+      _ => SentryColors.muted,
+    };
+    final icon = switch (relation) {
+      'INBOUND' => Icons.arrow_downward,
+      'OUTBOUND' => Icons.arrow_upward,
+      'OVERHEAD' => Icons.warning_amber_rounded,
+      'TRANSITING' => Icons.swap_horiz,
+      'HOLDING' => Icons.pause,
+      _ => Icons.help_outline,
+    };
+    return SentryChip(label: relation, color: color, icon: icon);
+  }
+
+  Widget _row(String label, String value, Color color) {
+    if (value.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Text(label, style: SentryType.rowLabel()),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 108, child: Text(label, style: SentryType.rowLabel())),
+          Expanded(child: Text(value, style: SentryType.rowValue(color))),
+        ],
+      ),
+    );
+  }
+
+  /// GPS-assisted positioning: walk to each node with the device and tap
+  /// the target button — the node's map position is set from the GPS fix,
+  /// in meters east/north of the stored origin. The first capture sets
+  /// the origin. Fix accuracy is always reported; coarse desktop fixes
+  /// are labeled as such, never silently trusted.
+  Widget _gpsCard(List<NodePosition> nodes) {
+    final origin = state.gpsOrigin;
+    return SentryPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('GPS POSITIONING', style: SentryType.section()),
+              const Spacer(),
+              TextButton(
+                onPressed:
+                    state.gpsBusy ? null : state.setGpsOriginHere,
+                child: const Text('SET ORIGIN HERE'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'WALK TO EACH NODE WITH THIS DEVICE AND TAP THE TARGET BUTTON ON ITS ROW — ITS MAP POSITION IS SET FROM THE GPS FIX. '
+            'THE FIRST CAPTURE SETS THE ORIGIN. ON WINDOWS, ENABLE LOCATION IN SETTINGS → PRIVACY & SECURITY → LOCATION.',
+            style: SentryType.section(10).copyWith(height: 1.6),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Text('ORIGIN  ', style: SentryType.rowLabel()),
+              Expanded(
+                child: Text(
+                  origin?.label ?? 'NOT SET — FIRST CAPTURE SETS IT',
+                  style: SentryType.rowValue(origin == null
+                      ? SentryColors.muted
+                      : SentryColors.green),
+                ),
+              ),
+              TextButton(
+                onPressed:
+                    state.gpsBusy ? null : state.captureDefendedGps,
+                child: const Text('SET DEFENDED HERE'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          for (final n in nodes)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 88,
+                    child: Text(shortNodeId(n.nodeId),
+                        style:
+                            SentryType.rowValue(SentryColors.onDark)
+                                .copyWith(fontSize: 12),
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                  Expanded(
+                    child: Text(n.gpsLabel,
+                        style: SentryType.rowValue(SentryColors.muted)
+                            .copyWith(fontSize: 11),
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                  SizedBox(
+                    width: 118,
+                    child: Text(
+                        '${n.x.toStringAsFixed(1)}, ${n.y.toStringAsFixed(1)} M',
+                        style: SentryType.rowLabel(),
+                        textAlign: TextAlign.right),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.gps_fixed, size: 18),
+                    color: SentryColors.green,
+                    tooltip:
+                        'Capture GPS position for ${n.nodeId}',
+                    onPressed: state.gpsBusy
+                        ? null
+                        : () => state.captureNodeGps(n.nodeId),
+                  ),
+                ],
+              ),
+            ),
+          if (state.gpsBusy || state.gpsMessage != null) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                if (state.gpsBusy)
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                if (state.gpsBusy) const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    state.gpsBusy
+                        ? 'ACQUIRING GPS FIX…'
+                        : (state.gpsMessage ?? ''),
+                    style: SentryType.section(10).copyWith(
+                      height: 1.6,
+                      color: state.gpsBusy
+                          ? SentryColors.blue
+                          : SentryColors.amber,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _nodeHeightsCard(List<NodePosition> nodes) {    return SentryPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('NODE HEIGHTS + ANTENNAS', style: SentryType.section()),
+          const SizedBox(height: 6),
+          Text(
+            'HEIGHT ABOVE GROUND PER NODE. ALTITUDE NEEDS NODES AT DIFFERENT HEIGHTS — A MAST OR ROOFTOP NODE UNLOCKS IT. '
+            'SET EACH NODE\'S ANTENNA TYPE FOR THE 3D BEAM VIEW (PANEL AIM AUTO-POINTS AT THE NEAREST NODE).',
+            style: SentryType.section(10).copyWith(height: 1.6),
+          ),
+          const SizedBox(height: 8),
+          for (final n in nodes)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 96,
+                    child: Text(shortNodeId(n.nodeId),
+                        style: SentryType.rowValue(SentryColors.onDark)
+                            .copyWith(fontSize: 12),
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                  SizedBox(
+                    width: 92,
+                    child: DropdownButton<String>(
+                      value: n.antenna,
+                      isDense: true,
+                      underline: const SizedBox(),
+                      dropdownColor: SentryColors.surface2,
+                      style: SentryType.rowValue(SentryColors.blue)
+                          .copyWith(fontSize: 12),
+                      items: const [
+                        DropdownMenuItem(
+                            value: 'whip', child: Text('WHIP')),
+                        DropdownMenuItem(
+                            value: 'panel', child: Text('PANEL')),
+                      ],
+                      onChanged: (v) {
+                        if (v != null) state.setNodeAntenna(n.nodeId, v);
+                      },
+                    ),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: n.height.clamp(0.0, 60.0),
+                      min: 0,
+                      max: 60,
+                      divisions: 60,
+                      label: '${n.height.toStringAsFixed(0)} m',
+                      onChanged: (v) =>
+                          state.setNodeHeight(n.nodeId, v),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 52,
+                    child: Text('${n.height.toStringAsFixed(0)} M',
+                        style: SentryType.rowLabel(),
+                        textAlign: TextAlign.right),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TrackScopeNote extends StatelessWidget {
+  const _TrackScopeNote();
+
+  @override
+  Widget build(BuildContext context) {
+    return SentryPanel(
+      child: Text(
+        'TRACKING HONESTY — ONE TARGET AT A TIME (TWO SIMULTANEOUS MOVERS BLEND INTO ONE ESTIMATE). '
+        'POSITION COMES FROM A COARSE 3D TOMOGRAPHIC GRID SEARCH OVER THE DISTURBED LINKS — AN ESTIMATE, NOT A FIX. '
+        'ALTITUDE IS THE WEAKEST AXIS AND STAYS "UNKNOWN" UNTIL NODES SIT AT DIFFERENT HEIGHTS. '
+        'TYPE GUESSES ARE HEURISTICS, NEVER IDENTIFICATION.',
+        style: SentryType.section(10).copyWith(height: 1.7),
+      ),
+    );
+  }
+}
+
+/// World (meters) <-> screen (pixels) transform for the field map.
+class _MapTransform {
+  _MapTransform(
+      {required this.scale, required this.ox, required this.oy});
+
+  final double scale;
+  final double ox;
+  final double oy;
+
+  Offset toScreen(double x, double y) =>
+      Offset(ox + x * scale, oy - y * scale);
+  double toWorldX(double sx) => (sx - ox) / scale;
+  double toWorldY(double sy) => (oy - sy) / scale;
+
+  factory _MapTransform.fit(Size size, List<math.Point<double>> pts,
+      {double zoom = 1.0}) {
+    var minX = -40.0, maxX = 40.0, minY = -40.0, maxY = 40.0;
+    if (pts.isNotEmpty) {
+      minX = pts.map((p) => p.x).reduce(math.min);
+      maxX = pts.map((p) => p.x).reduce(math.max);
+      minY = pts.map((p) => p.y).reduce(math.min);
+      maxY = pts.map((p) => p.y).reduce(math.max);
+      final padX = math.max(12.0, (maxX - minX) * 0.18);
+      final padY = math.max(12.0, (maxY - minY) * 0.18);
+      minX -= padX;
+      maxX += padX;
+      minY -= padY;
+      maxY += padY;
+    }
+    final scale = math.min(size.width / (maxX - minX),
+            size.height / (maxY - minY)) *
+        zoom;
+    final ox = size.width / 2 - (minX + maxX) / 2 * scale;
+    final oy = size.height / 2 + (minY + maxY) / 2 * scale;
+    return _MapTransform(scale: scale, ox: ox, oy: oy);
+  }
+}
+
+class _TrackingMapPainter extends CustomPainter {
+  _TrackingMapPainter({
+    required this.transform,
+    required this.nodes,
+    required this.disturbedPairs,
+    required this.defended,
+    required this.track,
+    required this.shadow,
+    required this.showShadow,
+  });
+
+  final _MapTransform transform;
+  final List<NodePosition> nodes;
+  final Set<String> disturbedPairs;
+  final DefendedPoint defended;
+  final TrackEstimate? track;
+  final List<ShadowCell> shadow;
+  final bool showShadow;
+
+  static String _pairKey(String a, String b) {
+    final ids = [a, b]..sort();
+    return '${ids[0]}|${ids[1]}';
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final tr = transform;
+
+    // Faint 10 m grid.
+    final gridPaint = Paint()
+      ..color = SentryColors.border.withAlpha(80)
+      ..strokeWidth = 1;
+    final x0 = tr.toWorldX(0), x1 = tr.toWorldX(size.width);
+    final y0 = tr.toWorldY(size.height), y1 = tr.toWorldY(0);
+    for (var gx = (x0 / 10).floor() * 10.0; gx <= x1; gx += 10) {
+      canvas.drawLine(
+          tr.toScreen(gx, y0), tr.toScreen(gx, y1), gridPaint);
+    }
+    for (var gy = (y0 / 10).floor() * 10.0; gy <= y1; gy += 10) {
+      canvas.drawLine(
+          tr.toScreen(x0, gy), tr.toScreen(x1, gy), gridPaint);
+    }
+
+    // Shadow: where the RF field dims — what the waves are hitting.
+    // Overlapping soft discs so cells blend into one continuous shadow.
+    if (showShadow && shadow.isNotEmpty) {
+      final r = 2.5 * tr.scale * 0.85;
+      for (final c in shadow) {
+        final p = tr.toScreen(c.x, c.y);
+        canvas.drawCircle(
+            p,
+            r,
+            Paint()
+              ..color =
+                  SentryColors.amber.withAlpha((c.v * 130).round()));
+      }
+      // Hot core: redraw the strongest cells brighter for definition.
+      for (final c in shadow) {
+        if (c.v < 0.55) continue;
+        canvas.drawCircle(
+            tr.toScreen(c.x, c.y),
+            r * 0.55,
+            Paint()
+              ..color = SentryColors.orange
+                  .withAlpha((c.v * 150).round()));
+      }
+    }
+
+    // Links between every pair of nodes.
+    final faintLink = Paint()
+      ..color = SentryColors.border
+      ..strokeWidth = 1.5;
+    final hotLink = Paint()
+      ..color = SentryColors.amber.withAlpha(220)
+      ..strokeWidth = 3;
+    for (var i = 0; i < nodes.length; i++) {
+      for (var j = i + 1; j < nodes.length; j++) {
+        final a = tr.toScreen(nodes[i].x, nodes[i].y);
+        final b = tr.toScreen(nodes[j].x, nodes[j].y);
+        final hot = disturbedPairs
+            .contains(_pairKey(nodes[i].nodeId, nodes[j].nodeId));
+        canvas.drawLine(a, b, hot ? hotLink : faintLink);
+      }
+    }
+
+    // Defended point: red crosshair.
+    final dp = tr.toScreen(defended.x, defended.y);
+    final dpPaint = Paint()
+      ..color = SentryColors.red
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+    canvas.drawCircle(dp, 11, dpPaint);
+    canvas.drawLine(
+        dp + const Offset(-17, 0), dp + const Offset(17, 0), dpPaint);
+    canvas.drawLine(
+        dp + const Offset(0, -17), dp + const Offset(0, 17), dpPaint);
+
+    // Line from defended point to track.
+    final t = track;
+    if (t != null) {
+      final tp = tr.toScreen(t.x, t.y);
+      canvas.drawLine(
+          dp,
+          tp,
+          Paint()
+            ..color = SentryColors.red.withAlpha(100)
+            ..strokeWidth = 1.5);
+    }
+
+    // Nodes — driver-colored dots (one unified map for all radios),
+    // amber when disturbed.
+    final disturbedNodes = <String>{};
+    for (final key in disturbedPairs) {
+      disturbedNodes.addAll(key.split('|'));
+    }
+    for (final n in nodes) {
+      final p = tr.toScreen(n.x, n.y);
+      final hot = disturbedNodes.contains(n.nodeId);
+      final color =
+          hot ? SentryColors.amber : driverColor(driverOf(n.nodeId));
+      canvas.drawCircle(p, 14, Paint()..color = color.withAlpha(45));
+      canvas.drawCircle(p, 8, Paint()..color = color.withAlpha(140));
+      canvas.drawCircle(p, 4.5, Paint()..color = color);
+      _label(canvas, shortNodeId(n.nodeId), p + const Offset(16, -24),
+          SentryColors.onDark);
+      if (n.height >= 0.5) {
+        _label(canvas, '${n.height.toStringAsFixed(0)}m',
+            p + const Offset(16, -10), SentryColors.muted);
+      }
+    }
+
+    // Track dot — amber glow with white core.
+    if (t != null) {
+      final p = tr.toScreen(t.x, t.y);
+      canvas.drawCircle(
+          p, 18, Paint()..color = SentryColors.amber.withAlpha(50));
+      canvas.drawCircle(
+          p, 10, Paint()..color = SentryColors.amber.withAlpha(160));
+      canvas.drawCircle(p, 5, Paint()..color = Colors.white);
+      _label(canvas, 'TRACK', p + const Offset(16, 6),
+          SentryColors.amber);
+    }
+  }
+
+  void _label(Canvas canvas, String text, Offset at, Color color) {
+    final tp = TextPainter(
+      text: TextSpan(
+          text: text,
+          style: TextStyle(
+            color: color,
+            fontSize: 10,
+            fontFamily: SentryType.mono,
+            letterSpacing: 1.2,
+          )),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, at);
+  }
+
+  @override
+  bool shouldRepaint(covariant _TrackingMapPainter old) => true;
+}
