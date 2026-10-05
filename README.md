@@ -21,7 +21,7 @@ Built by **Draco**.
 
 | Hardware | Status | Notes |
 |---|---|---|
-| 2× Silvus SC4200P (meshed) | **Live** | JSON-RPC `streamscape_data` telemetry driver; rolling-baseline tripwire per link direction |
+| Silvus StreamCaster mesh | **Live** | Tested with 2× SC4200P; supports N-node meshes — one radio's telemetry carries the whole mesh view, tripwire + tracker + map all scale per-link |
 | L3Harris AN/PRC-163 | **In progress** | SNMP discovery probe in `tools/`; driver follows what the radio exposes |
 | MPU5 / Wave Relay | **Planned** | Driver stub in the multi-driver framework |
 | Meshtastic nodes | **Planned** | Cheap GPS/PIR field nodes; driver wakes when hardware is on hand |
