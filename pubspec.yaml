@@ -1,0 +1,34 @@
+name: shepherd
+description: Shepherd — device-free RF sensing tripwire for Silvus StreamCaster mesh radios.
+publish_to: "none"
+version: 0.14.1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  geolocator: ^14.1.1
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+  universal_ble: ^2.3.0
+  # 802.11mc/802.11az WiFi RTT ranging (Android only; guarded at runtime).
+  wifi_ftm: ^0.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/models/disturbance_clf.json
+    - assets/models/track_stitcher.json
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/JetBrainsMono-Bold.ttf
+          weight: 700
