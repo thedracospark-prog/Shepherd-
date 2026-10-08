@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../theme.dart';
@@ -11,6 +12,7 @@ import '../models/link_sample.dart';
 import '../models/tracking.dart';
 import '../services/discovery.dart';
 import '../services/gps_positioning.dart';
+import '../services/health.dart';
 import '../services/tracker.dart';
 import '../services/tripwire.dart';
 import '../services/field_activity.dart';
@@ -117,6 +119,47 @@ class AppState extends ChangeNotifier {
   bool polling = false;
   String? error;
   String connectionLabel = 'Idle — press Start';
+
+  /// Audible + haptic alerts on confirmed detections and on loss of
+  /// coverage. Deliberately NOT persisted: every launch starts armed, so
+  /// a mute can't be forgotten across sessions.
+  bool alertsEnabled = true;
+
+  void toggleAlerts() {
+    alertsEnabled = !alertsEnabled;
+    notifyListeners();
+  }
+
+  DateTime _startedAt = DateTime.now();
+  Timer? _watchdog;
+  Coverage? _lastCoverage;
+  final Map<AlertKind, DateTime> _lastAlertAt = {};
+
+  /// How far a CLEAR verdict can be trusted right now. Recomputed on
+  /// demand from radio status, link freshness and baseline resets.
+  HealthReport get health {
+    final now = DateTime.now();
+    return assessHealth(
+      now: now,
+      startedAt: _startedAt,
+      drivers: [
+        for (final p in _pollers)
+          DriverHealthInput(
+            driverId: p.config.driverId,
+            label: p.status.label,
+            pollIntervalSecs: p.config.pollInterval,
+            lastPoll: p.status.lastPoll,
+            error: p.status.error,
+          ),
+      ],
+      lastByLink: {
+        for (final e in history.entries)
+          if (e.value.isNotEmpty) e.key: e.value.last,
+      },
+      staleAfter: _staleAfter,
+      rebaselines: _tripwire.rebaselinedAt,
+    );
+  }
 
   /// Dashboard radio card data, rebuilt on every poll cycle.
   List<DriverStatus> get driverStatuses =>
@@ -241,10 +284,18 @@ class AppState extends ChangeNotifier {
 
   void start() {
     stop();
+    // START always begins a fresh session: new baselines, new link set.
+    // (Establish the baseline with the area clear: whatever is standing
+    // in a link when its baseline is learned is invisible until it moves.)
     _tracker.reset();
     track = null;
+    history.clear();
+    _tripwire = Tripwire(config: settings.tripwireConfig);
     _latestByPoller.clear();
     _lastFuse = null;
+    _startedAt = DateTime.now();
+    _lastCoverage = null;
+    _lastAlertAt.clear();
     polling = true;
     error = null;
     if (settings.simulatedMode) {
@@ -290,6 +341,45 @@ class AppState extends ChangeNotifier {
         (_) => _tickPoller(p),
       );
     }
+    // Dead-man check: runs even if every poll hangs, so the banner can't
+    // freeze on its last (possibly CLEAR) state.
+    _watchdog = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _watchdogTick(),
+    );
+  }
+
+  void _watchdogTick() {
+    if (!polling) return;
+    final level = health.level;
+    final prev = _lastCoverage;
+    _lastCoverage = level;
+    if ((level == Coverage.blind || level == Coverage.degraded) &&
+        level != prev) {
+      unawaited(_alert(AlertKind.fault));
+    }
+    notifyListeners();
+  }
+
+  /// Beep + buzz. Rate-limited per kind so a flapping link can't turn the
+  /// device into a siren. Uses only Flutter's built-in platform sound and
+  /// haptics; on a platform without them this is a silent no-op.
+  Future<void> _alert(AlertKind kind) async {
+    if (!alertsEnabled) return;
+    final now = DateTime.now();
+    final last = _lastAlertAt[kind];
+    if (last != null && now.difference(last) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastAlertAt[kind] = now;
+    try {
+      final pulses = kind == AlertKind.detection ? 3 : 2;
+      for (var i = 0; i < pulses; i++) {
+        await SystemSound.play(SystemSoundType.alert);
+        await HapticFeedback.heavyImpact();
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+    } catch (_) {}
   }
 
   void _addPoller(RadioConfig config, RadioDriver driver) {
@@ -305,6 +395,8 @@ class AppState extends ChangeNotifier {
     }
     _pollers.clear();
     _latestByPoller.clear();
+    _watchdog?.cancel();
+    _watchdog = null;
     _simDriver = null;
     polling = false;
     notifyListeners();
@@ -338,6 +430,7 @@ class AppState extends ChangeNotifier {
       final classified = [
         for (final e in fresh) _classifyEvent(e, p.config.pollInterval),
       ];
+      if (classified.isNotEmpty) unawaited(_alert(AlertKind.detection));
       events.insertAll(0, classified);
       if (events.length > 200) {
         events.removeRange(200, events.length);

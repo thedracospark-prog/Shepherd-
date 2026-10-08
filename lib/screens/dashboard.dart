@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../services/health.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
 
@@ -44,26 +45,59 @@ class DashboardScreen extends StatelessWidget {
 
   /// The big one: CLEAR (shield) vs DETECTED (warning), observatory style.
   Widget _alertPanel(List<String> disturbed) {
-    final detected = state.polling && disturbed.isNotEmpty;
+    final h = state.health;
     final idle = !state.polling;
+    final detected = !idle && disturbed.isNotEmpty;
+    // CLEAR is only shown when the system can vouch for it. A detection
+    // always wins; otherwise a failed or partial system is never green.
+    final blind = !idle && !detected && h.level == Coverage.blind;
+    final degraded = !idle && !detected && h.level == Coverage.degraded;
+    final starting = !idle && !detected && h.level == Coverage.starting;
     final color = idle
         ? SentryColors.muted
         : detected
             ? SentryColors.amber
-            : SentryColors.green;
+            : blind
+                ? SentryColors.red
+                : degraded
+                    ? SentryColors.orange
+                    : starting
+                        ? SentryColors.muted
+                        : SentryColors.green;
     final icon = idle
         ? Icons.pause_circle_outline
         : detected
             ? Icons.warning_amber_rounded
-            : Icons.shield_outlined;
-    final title = idle ? 'PAUSED' : detected ? 'DETECTED' : 'CLEAR';
+            : blind
+                ? Icons.sensors_off
+                : degraded
+                    ? Icons.error_outline
+                    : starting
+                        ? Icons.hourglass_empty
+                        : Icons.shield_outlined;
+    final title = idle
+        ? 'PAUSED'
+        : detected
+            ? 'DETECTED'
+            : blind
+                ? 'NO DATA'
+                : degraded
+                    ? 'DEGRADED'
+                    : starting
+                        ? 'STARTING'
+                        : 'CLEAR';
     final subtitle = idle
         ? 'PRESS START TO BEGIN MONITORING'
         : detected
             ? '${disturbed.length} LINK DIRECTION(S) DISTURBED'
-            : state.history.isEmpty
-                ? 'WAITING FOR LINK DATA'
-                : 'MONITORING ${state.history.length} LINK DIRECTION(S)';
+            : blind
+                ? 'NOT MONITORING - CLEAR CANNOT BE ASSUMED'
+                : degraded
+                    ? 'CLEAR ON ${h.liveLinks} OF ${h.expectedLinks} LINK DIRECTION(S)'
+                    : starting
+                        ? 'WAITING FOR LINK DATA'
+                        : 'MONITORING ${h.liveLinks} LINK DIRECTION(S)';
+    final showReasons = !idle && h.reasons.isNotEmpty;
     final live = !state.settings.simulatedMode;
     return SentryPanel(
       glow: idle ? null : color,
@@ -129,13 +163,36 @@ class DashboardScreen extends StatelessWidget {
                   .copyWith(fontSize: 11),
             ),
           ],
+          if (showReasons) ...[
+            const SizedBox(height: 8),
+            for (final r in h.reasons.take(4))
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  r,
+                  style: SentryType.rowValue(
+                    blind ? SentryColors.red : SentryColors.orange,
+                  ).copyWith(fontSize: 11),
+                ),
+              ),
+          ],
           const SizedBox(height: 16),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: ElevatedButton(
-              onPressed: state.polling ? state.stop : state.start,
-              child: Text(state.polling ? 'STOP' : 'START'),
-            ),
+          Row(
+            children: [
+              ElevatedButton(
+                onPressed: state.polling ? state.stop : state.start,
+                child: Text(state.polling ? 'STOP' : 'START'),
+              ),
+              const SizedBox(width: 12),
+              OutlinedButton.icon(
+                onPressed: state.toggleAlerts,
+                icon: Icon(
+                  state.alertsEnabled ? Icons.volume_up : Icons.volume_off,
+                  size: 18,
+                ),
+                label: Text(state.alertsEnabled ? 'ALERTS ON' : 'MUTED'),
+              ),
+            ],
           ),
         ],
       ),

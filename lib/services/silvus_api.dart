@@ -16,7 +16,9 @@ import '../models/link_sample.dart';
 /// `$pcns_<from>_<to>` (per-chain values). All numeric fields are parsed
 /// tolerantly: anything missing or malformed becomes null rather than throwing.
 class SilvusApi {
-  SilvusApi({required this.ip, this.timeout = const Duration(seconds: 8)});
+  // 3 s, not 8: a hung radio blinds that poller for the whole timeout,
+  // and the health check can only report it once the call returns.
+  SilvusApi({required this.ip, this.timeout = const Duration(seconds: 3)});
 
   final String ip;
   final Duration timeout;

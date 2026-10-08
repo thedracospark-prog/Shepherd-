@@ -86,11 +86,17 @@ class Tripwire {
   final Map<String, double> _dipPeak = {};
   final Map<String, int> _held = {};
   final List<CrossingEvent> _pending = [];
+  final Map<String, DateTime> _rebaselinedAt = {};
   int _rebaselines = 0;
 
   /// How many times a link gave up holding its baseline and re-baselined
   /// (lasting level change). Diagnostic.
   int get rebaselineCount => _rebaselines;
+
+  /// When each link last gave up holding its baseline. After a reset the
+  /// detector treats the new level as normal, so anything still standing
+  /// there is invisible; callers should surface this, not show CLEAR.
+  Map<String, DateTime> get rebaselinedAt => Map.unmodifiable(_rebaselinedAt);
 
   /// Feed one raw sample; returns the sample enriched with dip, baseline
   /// and this link's threshold.
@@ -134,6 +140,7 @@ class Tripwire {
           _held[key] = 0;
           _resetEpisode(key);
           _rebaselines += 1;
+          _rebaselinedAt[key] = raw.timestamp;
           return raw.copyWith(
             dip: 0.0,
             baseline: snr,
