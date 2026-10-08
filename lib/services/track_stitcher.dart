@@ -142,7 +142,7 @@ class TrackStitcher {
     final peak = <String, double>{};
     final count = <String, int>{};
     for (final s in samples) {
-      if (s.dip < dipThreshold) continue;
+      if (!s.isDisturbed(dipThreshold)) continue;
       final a = nodes[s.fromNode];
       final b = nodes[s.toNode];
       if (a == null || b == null) continue;

@@ -44,5 +44,11 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Windows plugin symlinks + generated CMake files (recreated by pub get/build)
+windows/flutter/ephemeral/
+
+# Release zips built locally
+*.zip
+
 # Widget Preview related
 .widget_preview/

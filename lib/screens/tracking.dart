@@ -7,6 +7,7 @@ import '../models/tracking.dart';
 import '../services/tracker.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
+import '../utils/hull.dart';
 
 /// Tracking tab in the RuView observatory style: dark field map with
 /// glowing nodes, fused track readout as technical rows, node heights.
@@ -710,28 +711,70 @@ class _TrackingMapPainter extends CustomPainter {
           tr.toScreen(x0, gy), tr.toScreen(x1, gy), gridPaint);
     }
 
-    // Shadow: where the RF field dims — what the waves are hitting.
-    // Overlapping soft discs so cells blend into one continuous shadow.
-    if (showShadow && shadow.isNotEmpty) {
+    // Field boundary: convex hull of the nodes, lit in purple so the
+    // watched area reads at a glance.
+    if (nodes.length >= 2) {
+      final hull =
+          convexHull([for (final n in nodes) math.Point(n.x, n.y)]);
+      final pts = [for (final h in hull) tr.toScreen(h.x, h.y)];
+      final halo = Paint()
+        ..color = SentryColors.purple.withAlpha(45)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 12
+        ..strokeJoin = StrokeJoin.round
+        ..strokeCap = StrokeCap.round;
+      final edge = Paint()
+        ..color = SentryColors.purple.withAlpha(190)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5
+        ..strokeJoin = StrokeJoin.round
+        ..strokeCap = StrokeCap.round;
+      if (pts.length == 2) {
+        canvas.drawLine(pts[0], pts[1], halo);
+        canvas.drawLine(pts[0], pts[1], edge);
+      } else if (pts.length >= 3) {
+        final path = Path()..addPolygon(pts, true);
+        canvas.drawPath(path, halo);
+        canvas.drawPath(path, edge);
+      }
+    }
+
+    // Shadow heat, pinned to the intruder: only cells near the current
+    // track glow. No track, no heat — the lit boundary above carries the
+    // "where we watch" information on its own.
+    final t0 = track;
+    if (showShadow && t0 != null && shadow.isNotEmpty) {
+      // Heat halo radius in meters: gaussian falloff around the track.
+      const sigmaM = 14.0;
+      double falloff(ShadowCell c) {
+        final dx = c.x - t0.x, dy = c.y - t0.y;
+        return math.exp(-(dx * dx + dy * dy) / (2 * sigmaM * sigmaM));
+      }
+
+      // Overlapping soft discs so cells blend into one continuous shadow.
       final r = 2.5 * tr.scale * 0.85;
       for (final c in shadow) {
+        final fall = falloff(c);
+        if (fall < 0.03) continue;
         final p = tr.toScreen(c.x, c.y);
         canvas.drawCircle(
             p,
             r,
             Paint()
-              ..color =
-                  SentryColors.amber.withAlpha((c.v * 130).round()));
+              ..color = SentryColors.amber
+                  .withAlpha((c.v * 130 * fall).round()));
       }
       // Hot core: redraw the strongest cells brighter for definition.
       for (final c in shadow) {
         if (c.v < 0.55) continue;
+        final fall = falloff(c);
+        if (fall < 0.03) continue;
         canvas.drawCircle(
             tr.toScreen(c.x, c.y),
             r * 0.55,
             Paint()
               ..color = SentryColors.orange
-                  .withAlpha((c.v * 150).round()));
+                  .withAlpha((c.v * 150 * fall).round()));
       }
     }
 

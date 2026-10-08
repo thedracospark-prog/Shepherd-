@@ -51,19 +51,8 @@ class Tracker {
     // Link *pairs* (directions deduped, strongest dip kept) — ALL pairs,
     // not just disturbed ones: quiet links carry "the target is NOT near
     // me" information that sharpens the fix.
-    final pairs = <String, _PairDip>{};
-    for (final s in samples) {
-      final a = nodes[s.fromNode];
-      final b = nodes[s.toNode];
-      if (a == null || b == null) continue;
-      final key = _pairKey(s.fromNode, s.toNode);
-      final prev = pairs[key];
-      if (prev == null || s.dip > prev.dip) {
-        pairs[key] = _PairDip(a: a, b: b, dip: s.dip);
-      }
-    }
-    final disturbed =
-        pairs.values.where((p) => p.dip >= dipThreshold).toList();
+    final pairs = _dedupePairs(samples, nodes, dipThreshold);
+    final disturbed = pairs.values.where((p) => p.isDisturbed).toList();
     if (disturbed.isEmpty) {
       if (_lastDetect != null &&
           now.difference(_lastDetect!).inMilliseconds / 1000 >
@@ -258,17 +247,7 @@ class Tracker {
     required double dipThreshold,
     double cellM = 2.5,
   }) {
-    final pairs = <String, _PairDip>{};
-    for (final s in samples) {
-      final a = nodes[s.fromNode];
-      final b = nodes[s.toNode];
-      if (a == null || b == null) continue;
-      final key = _pairKey(s.fromNode, s.toNode);
-      final prev = pairs[key];
-      if (prev == null || s.dip > prev.dip) {
-        pairs[key] = _PairDip(a: a, b: b, dip: s.dip);
-      }
-    }
+    final pairs = _dedupePairs(samples, nodes, dipThreshold);
     final out = <ShadowCell>[];
     if (pairs.isEmpty) return out;
 
@@ -296,7 +275,7 @@ class Tracker {
       for (var y = minY; y <= maxY; y += cellM) {
         var v = 0.0;
         for (final p in linkList) {
-          if (p.dip < dipThreshold * 0.5) continue;
+          if (p.dip < p.threshold * 0.5) continue;
           final d = _distPtSeg2D(x, y, p.a, p.b);
           v += p.dip * math.exp(-math.pow(d / sigma, 2));
         }
@@ -312,6 +291,34 @@ class Tracker {
       if (v > 0.03) out.add(ShadowCell(x: xs[i], y: ys[i], v: v));
     }
     return out;
+  }
+
+  /// Collapse link directions into undirected pairs. Of the two
+  /// directions, keep the one that is furthest past ITS OWN threshold
+  /// (each direction can have a different noise level, so raw dip depth
+  /// is not comparable). [fallback] is used for samples that carry no
+  /// threshold of their own.
+  static Map<String, _PairDip> _dedupePairs(
+    List<LinkSample> samples,
+    Map<String, NodePosition> nodes,
+    double fallback,
+  ) {
+    final pairs = <String, _PairDip>{};
+    for (final s in samples) {
+      final a = nodes[s.fromNode];
+      final b = nodes[s.toNode];
+      if (a == null || b == null) continue;
+      final key = _pairKey(s.fromNode, s.toNode);
+      final cand = _PairDip(
+        a: a,
+        b: b,
+        dip: s.dip,
+        threshold: s.effectiveThreshold(fallback),
+      );
+      final prev = pairs[key];
+      if (prev == null || cand.margin > prev.margin) pairs[key] = cand;
+    }
+    return pairs;
   }
 
   static String _pairKey(String a, String b) {
@@ -390,11 +397,24 @@ class Tracker {
 }
 
 class _PairDip {
-  _PairDip({required this.a, required this.b, required this.dip});
+  _PairDip({
+    required this.a,
+    required this.b,
+    required this.dip,
+    required this.threshold,
+  });
 
   final NodePosition a;
   final NodePosition b;
   final double dip;
+
+  /// Dip depth at which this pair's link counts as disturbed.
+  final double threshold;
+
+  /// How far past (or short of) its own threshold the dip is.
+  double get margin => dip - threshold;
+
+  bool get isDisturbed => dip >= threshold;
 }
 
 /// One cell of the shadow (attenuation) grid: field-local meters and a

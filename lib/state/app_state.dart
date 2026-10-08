@@ -50,7 +50,7 @@ class AppSettings {
     this.pollInterval = 0.25,
     this.dipThreshold = 6.0,
     this.confirmPolls = 2,
-    this.baselineWindow = 60,
+    this.baselineWindow = 120,
     this.simulatedMode = true,
     this.wifiDipThresholdDb = 6.0,
   });
@@ -191,8 +191,11 @@ class AppState extends ChangeNotifier {
   /// (dip at/above threshold). Drives the DETECTED banner.
   List<String> get disturbedLinks {
     final out = <String>[];
+    final now = DateTime.now();
     history.forEach((key, h) {
-      if (h.isNotEmpty && h.last.dip >= settings.dipThreshold) {
+      if (h.isNotEmpty &&
+          _isLive(h.last, now) &&
+          h.last.isDisturbed(settings.dipThreshold)) {
         out.add(key);
       }
     });
@@ -203,8 +206,11 @@ class AppState extends ChangeNotifier {
   /// Used to highlight links on the tracking map.
   Set<String> get disturbedPairs {
     final out = <String>{};
+    final now = DateTime.now();
     history.forEach((_, h) {
-      if (h.isNotEmpty && h.last.dip >= settings.dipThreshold) {
+      if (h.isNotEmpty &&
+          _isLive(h.last, now) &&
+          h.last.isDisturbed(settings.dipThreshold)) {
         final ids = [h.last.fromNode, h.last.toNode]..sort();
         out.add('${ids[0]}|${ids[1]}');
       }
@@ -238,6 +244,7 @@ class AppState extends ChangeNotifier {
     _tracker.reset();
     track = null;
     _latestByPoller.clear();
+    _lastFuse = null;
     polling = true;
     error = null;
     if (settings.simulatedMode) {
@@ -341,6 +348,12 @@ class AppState extends ChangeNotifier {
       error = null;
     } catch (e) {
       p.status.error = 'Poll error: $e';
+      // A failed radio must not keep feeding its last batch into the
+      // fusion: drop it and re-solve without it.
+      _latestByPoller.remove(_pollers.indexOf(p));
+      try {
+        _updateFusedTrack(force: true);
+      } catch (_) {}
       _refreshConnectionLabel();
     } finally {
       p.busy = false;
@@ -355,11 +368,22 @@ class AppState extends ChangeNotifier {
   /// Data association across drivers falls out of the tracker's
   /// continuity logic: detections close in time and space join the
   /// same track.
-  void _updateFusedTrack() {
-    final all = [
-      for (final batch in _latestByPoller.values) ...batch,
-    ];
+  void _updateFusedTrack({bool force = false}) {
     final now = DateTime.now();
+    // Every radio ticks on its own timer; don't re-solve the whole
+    // field once per radio per cycle.
+    final last = _lastFuse;
+    if (!force && last != null && now.difference(last) < _minFuseGap) {
+      return;
+    }
+    _lastFuse = now;
+    // Only samples fresh enough to still be evidence take part. A radio
+    // that stops answering ages out here even if nothing clears its batch.
+    final all = [
+      for (final batch in _latestByPoller.values)
+        for (final s in batch)
+          if (_isLive(s, now)) s,
+    ];
     track = _tracker.update(
       now: now,
       samples: all,
@@ -385,7 +409,7 @@ class AppState extends ChangeNotifier {
     if (track != null) {
       final activeDrivers = <String>{};
       for (final s in all) {
-        if (s.dip >= settings.dipThreshold) {
+        if (s.isDisturbed(settings.dipThreshold)) {
           activeDrivers.add(driverOf(s.fromNode));
         }
       }
@@ -407,6 +431,24 @@ class AppState extends ChangeNotifier {
       }
     }
   }
+
+  DateTime? _lastFuse;
+  static const _minFuseGap = Duration(milliseconds: 100);
+
+  /// How long a sample from [driverId] stays valid: four poll intervals
+  /// of that driver's slowest radio, but never under 2 s.
+  Duration _staleAfter(String driverId) {
+    var secs = 2.0;
+    for (final p in _pollers) {
+      if (p.config.driverId == driverId) {
+        secs = math.max(secs, p.config.pollInterval * 4);
+      }
+    }
+    return Duration(milliseconds: (secs * 1000).round());
+  }
+
+  bool _isLive(LinkSample s, DateTime now) =>
+      now.difference(s.timestamp) <= _staleAfter(driverOf(s.fromNode));
 
   void _refreshConnectionLabel() {
     if (settings.simulatedMode) {
@@ -438,7 +480,7 @@ class AppState extends ChangeNotifier {
       history.forEach((_, samples) {
         if (samples.isEmpty) return;
         final last = samples.last;
-        if (last.dip >= settings.dipThreshold &&
+        if (last.isDisturbed(settings.dipThreshold) &&
             now.difference(last.timestamp).inSeconds < 5) {
           simulLinks++;
           activeDrivers.add(driverOf(last.linkKey));
@@ -446,7 +488,7 @@ class AppState extends ChangeNotifier {
       });
       final features = extractDisturbanceFeatures(
         dips: dips,
-        threshold: settings.dipThreshold,
+        threshold: h.last.effectiveThreshold(settings.dipThreshold),
         durationSecs: e.durationSecs,
         simulLinks: simulLinks,
         crossDriver: activeDrivers.length > 1,

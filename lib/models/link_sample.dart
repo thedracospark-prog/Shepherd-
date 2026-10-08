@@ -30,6 +30,11 @@ class LinkSample {
   /// Rolling median baseline the dip is measured against. Estimate.
   final double baseline;
 
+  /// Dip depth at which THIS link counts as disturbed. The tripwire sets
+  /// it per link from the link's own noise (see [TripwireConfig.adaptive]);
+  /// NaN on raw samples that haven't been through the tripwire yet.
+  final double threshold;
+
   const LinkSample({
     required this.timestamp,
     required this.fromNode,
@@ -41,6 +46,7 @@ class LinkSample {
     this.noiseTo,
     this.dip = 0.0,
     this.baseline = double.nan,
+    this.threshold = double.nan,
   });
 
   String get linkKey => '$fromNode → $toNode';
@@ -48,7 +54,15 @@ class LinkSample {
   String get snrLabel => snr == null ? '—' : '${snr!.toStringAsFixed(0)} (est.)';
   String get dipLabel => '${dip >= 0 ? '-' : '+'}${dip.abs().toStringAsFixed(0)} (est.)';
 
-  LinkSample copyWith({double? dip, double? baseline}) => LinkSample(
+  /// This link's own threshold, or [fallback] when none was attached.
+  double effectiveThreshold(double fallback) =>
+      threshold.isNaN ? fallback : threshold;
+
+  /// True when the dip is at/above this link's own threshold.
+  bool isDisturbed(double fallback) => dip >= effectiveThreshold(fallback);
+
+  LinkSample copyWith({double? dip, double? baseline, double? threshold}) =>
+      LinkSample(
         timestamp: timestamp,
         fromNode: fromNode,
         toNode: toNode,
@@ -59,6 +73,7 @@ class LinkSample {
         noiseTo: noiseTo,
         dip: dip ?? this.dip,
         baseline: baseline ?? this.baseline,
+        threshold: threshold ?? this.threshold,
       );
 }
 
